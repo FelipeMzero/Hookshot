@@ -18,9 +18,17 @@
 void hos_commit(uint64_t addr, uint64_t size) {
     if (!size) return;
     const uint64_t lo = addr & ~0xFFFFULL, hi = (addr + size + 0xFFFF) & ~0xFFFFULL;
-    if (!VirtualAlloc(GP(lo), (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE))
-        hos_log("mem: commit of %#llx bytes at %#llx failed (error %lu)", (unsigned long long)(hi - lo),
-                (unsigned long long)lo, GetLastError());
+    if (VirtualAlloc(GP(lo), (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE)) return;
+    const DWORD err = GetLastError();
+    uint64_t committed = 0;
+    const uint64_t step = 64ULL << 20;
+    for (uint64_t p = lo; p < hi && committed < (2048ULL << 20); p += step) {
+        const uint64_t n = (hi - p < step) ? (hi - p) : step;
+        if (!VirtualAlloc(GP(p), (SIZE_T)n, MEM_COMMIT, PAGE_READWRITE)) break;
+        committed += n;
+    }
+    hos_log("mem: commit of %#llx bytes at %#llx failed (error %lu; committed %llu MB upfront, rest on touch)",
+            (unsigned long long)(hi - lo), (unsigned long long)lo, err, (unsigned long long)(committed >> 20));
 }
 
 static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info) {

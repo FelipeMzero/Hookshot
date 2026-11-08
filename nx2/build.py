@@ -274,7 +274,10 @@ if MARCH in ("x86-64-v2", "x86-64"):
     print("build: this CPU has no AVX2: the game is built for %s (a little slower)" % MARCH, flush=True)
 elif MARCH != "x86-64-v3":
     print("build: tuned for host CPU architecture %s" % MARCH, flush=True)
-CPU = ["-march=" + MARCH, "-mtune=" + MARCH, "-ffp-contract=off"]
+# (lifted chunks keep x86-64-v3 by default so prebuilt/cached code_NNN.o objects stay valid; host/opus/vk use MARCH)
+LIFT_MARCH = os.environ.get("RX_MARCH") or ("x86-64-v3" if MARCH.startswith("znver") else MARCH)
+CPU = ["-march=" + LIFT_MARCH, "-ffp-contract=off"]
+HOST_CPU = ["-march=" + MARCH, "-mtune=" + MARCH, "-ffp-contract=off"]
 
 
 def flags(gen, rt64, opt, polls):
@@ -413,8 +416,8 @@ def main():
     # biggest first, so the long ones do not end up alone at the end
     srcs.sort(key=lambda s: -os.path.getsize(s))
     # (hookshot) code_hot.c, the lift's hot functions together (A64_HOT_FUNCS + A64_HOT_CHUNK=1): at RX_HOT_OPT
-    # (default O3), so the hot callees inline into their hot callers
-    hot_fl = [("-" + os.environ.get("RX_HOT_OPT", "O3")) if f == "-" + a.opt else f for f in fl]
+    # (default O2), so the hot callees inline into their hot callers
+    hot_fl = [("-" + os.environ.get("RX_HOT_OPT", "O2")) if f == "-" + a.opt else f for f in fl]
     # (hookshot) RX_PGO=gen: code_hot.c counts its branches (host/pgo_rt.c writes them; -O1 builds much sooner, and the counters are
     # placed before the optimiser, so a profile from it fits the -O2/-O3 build). RX_PGO=<merged .prof>: built with that profile
     if PGO == "gen":
@@ -425,7 +428,7 @@ def main():
              hot_fl if os.path.basename(s).startswith("code_hot") else fl,
              shim_deps if os.path.dirname(s) == NX2_RT else deps) for s in srcs]
     # the runtime: ordinary C at -O3, with its own headers (any host/*.h change rebuilds all of it)
-    host_fl = target() + CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
+    host_fl = target() + HOST_CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
         ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O3", "-g0", "-mcx16", "-DA64_POLLING"] + WRITE_TRACK
     host_deps = deps + b"".join(open(os.path.join(HOST, f), "rb").read() for f in sorted(os.listdir(HOST))
                                 if f.endswith(".h"))
@@ -440,7 +443,7 @@ def main():
               ([stamp_def] if os.path.basename(s) == "hos_main.c" else []), host_deps) for s in host_srcs]
     # libopus 1.5.2 (third_party/opus, from TOTKPort): nn::codec's hardware Opus decoder (host/nn_codec.c)
     if host_srcs:
-        oflags = target() + CPU + ["-O3", "-g0", "-Wno-everything", "-DOPUS_BUILD", "-DUSE_ALLOCA",
+        oflags = target() + ["-O2", "-g0", "-Wno-everything", "-DOPUS_BUILD", "-DUSE_ALLOCA",
                                               "-DHAVE_LRINTF", "-DHAVE_LRINT"] +             ["-I" + os.path.join(OPUS, d) for d in ("include", "celt", "silk", "silk/float", "src")]
         for rel in open(os.path.join(OPUS, "sources.txt")).read().split():
             jobs.append((cc, os.path.join(OPUS, rel), os.path.join(obj_dir, "opus_" + rel.replace("/", "_")[:-2] + ".o"),
@@ -451,7 +454,7 @@ def main():
         print("no wgpu-native at %s (WGPU_NATIVE): building without the renderer" % WGPU)
     if wgpu:
         cxx = toolchain.need(toolchain.find("clang++"))
-        gflags = target() + CPU + ["-std=c++20", "-O3", "-g0", "-DNDEBUG", "-Wno-everything",
+        gflags = target() + ["-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything",
                                               "-I" + os.path.join(GPU, "compat"),
                                               "-I" + os.path.join(GPU, "third_party", "suyu"),
                                               "-I" + os.path.join(WGPU, "include"), "-I" + HOST, "-I" + rt64] + WRITE_TRACK +                  ["-include", os.path.join(GPU, "render", "rx_wgpu_names.h")]   # (rx_* -> wgr_*: host/rx_backend.c)
@@ -480,7 +483,7 @@ def main():
             # (what the code takes for granted, which newer C++ libraries bring in by themselves and older ones do not: issue 48)
             "-include", "algorithm", "-include", "cstdio", "-include", "cstdlib", "-include", "cstring", "-include", "functional",
             "-include", "string", "-include", "vector",
-            "-std=c++20", "-O3", "-g0", "-DNDEBUG", "-Wno-everything", "-DVK_NO_PROTOTYPES", "-DMKWVK_BUILDING",
+            "-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything", "-DVK_NO_PROTOTYPES", "-DMKWVK_BUILDING",
             *(["-DHOOKSHOT_RELEASE"] if os.environ.get("RX_RELEASE") == "1" else []),   # (the shaders precompiled before the game)
             # (Eden's recompiler before suyu's root: suyu has its own shader_recompiler/ headers, and a Shader::Info
             # of the other layout in some objects is what crashed the descriptor walk. MKWVK_INCLUDES changes the
@@ -491,6 +494,7 @@ def main():
             "-I" + os.path.join(vk, "sirit", "include"), "-I" + os.path.join(vk, "sirit", "src"),
             "-I" + os.path.join(spirv_headers, "include"), "-I" + os.path.join(spirv_headers, "include", "spirv", "unified1"),
             "-I" + os.path.join(vk_headers, "include"), "-I" + vk] +             (["-I" + os.path.join(cpm_package("vulkanmemoryallocator"), "include")] if cpm_package("vulkanmemoryallocator") else [])
+        vflags_hot = [("-O3" if f == "-O2" else f) for f in vflags] + ["-march=" + MARCH, "-mtune=" + MARCH]
         # (Eden's recompiler and sirit see only their own headers: a change to the back end's vk_*.h does not
         # rebuild their ~500 files; the back end itself depends on everything, suyu's texture decoders included)
         vk_lib_deps = tree_headers(os.path.join(vk, "eden"), os.path.join(vk, "sirit"), os.path.join(vk, "compat"),
@@ -500,8 +504,9 @@ def main():
         for src in vk_sources():
             name = os.path.relpath(src, vk).replace(os.sep, "_")[:-4]
             lib = os.path.relpath(src, vk).split(os.sep)[0] in ("eden", "sirit")
+            hot_vk = (not lib) or os.path.basename(src) == "emit_spirv_warp.cpp"
             vk_jobs.append((cxx, src, os.path.join(obj_dir, "vk_" + name + ".o"),
-                            vflags + ([stamp_def] if os.path.basename(src) == "vk_menu.cpp" else []),
+                            (vflags_hot if hot_vk else vflags) + ([stamp_def] if os.path.basename(src) == "vk_menu.cpp" else []),
                             vk_lib_deps if lib else vdeps))
         if LINUX:   # (its own copy of the Win32 calls on POSIX, and the bit of GDI the Insert menu draws text with)
             cflags = target() + CPU + ["-fPIC", "-O2", "-g0", "-Wno-everything", "-D_GNU_SOURCE", "-I" + POSIX,

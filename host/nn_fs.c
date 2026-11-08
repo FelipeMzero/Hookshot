@@ -273,6 +273,10 @@ static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t
         ov.Offset = (DWORD)o;
         ov.OffsetHigh = (DWORD)(o >> 32);
         DWORD chunk = (DWORD)(size - done > 0x40000000 ? 0x40000000 : size - done), got = 0;
+        {
+            const uint64_t clo = (buf + done) & ~0xFFFFULL, chi = (buf + done + chunk + 0xFFFF) & ~0xFFFFULL;
+            VirtualAlloc(GP(clo), (SIZE_T)(chi - clo), MEM_COMMIT, PAGE_READWRITE);
+        }
         if (!ReadFile(fh->h, GP(buf + done), chunk, &got, &ov) || !got) break;
         done += got;
     }
