@@ -22,6 +22,13 @@ bool started = false;
 void worker() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     SetThreadDescription(GetCurrentThread(), L"mkw_vk worker");
+    if (host && host->reserved_cpus) {
+        if (const uint64_t reserved = host->reserved_cpus()) {
+            DWORD_PTR proc = 0, sys = 0;
+            GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+            if ((uint64_t)proc & ~reserved) SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)((uint64_t)proc & ~reserved));
+        }
+    }
     for (;;) {
         std::function<void()> fn;
         {

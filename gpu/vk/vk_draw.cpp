@@ -3801,7 +3801,7 @@ bool mesh_indirect_convert(VkCommandBuffer cmd, const DrawArgs& d) {
     mesh_conv_buf = VK_NULL_HANDLE;
     static const bool raw = getenv("RX_VK_MESH_IND_RAW") && atoi(getenv("RX_VK_MESH_IND_RAW")) != 0;
     static const uint32_t word = getenv("RX_VK_MESH_IND_COUNT_WORD") ? (uint32_t)atoi(getenv("RX_VK_MESH_IND_COUNT_WORD")) & 3 : 0;
-    if (raw || !d.mesh || !d.indirect) return false;
+    if (raw || !d.mesh || !d.indirect || !dev.mesh_shader) return false;
     const uint32_t n = (uint32_t)std::clamp(d.max, 1, 4096);
     const uint32_t stride = d.stride > 0 ? (uint32_t)d.stride : 8;
     const BufferRef args = gpu_buffer_bind(d.indirect, (uint64_t)(n - 1) * stride + 4 * (word + 1), false);
@@ -3889,6 +3889,7 @@ struct KeptVertex {
 thread_local KeptVertex kept_vb[16];
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
+    if (d.mesh && !dev.mesh_shader) return;
     PROF(PROF_DRAW);
     stats_tick();
     mesh_indirect_convert(cmd, d);   // (EvilOOT: before the pass opens; sets mesh_conv_buf for the mesh draw below)

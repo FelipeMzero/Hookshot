@@ -243,10 +243,26 @@ def host_march():
             # (PF_AVX2_INSTRUCTIONS_AVAILABLE 40; PF_SSE4_2_INSTRUCTIONS_AVAILABLE 38. Windows reports no FMA/BMI2 bit, but
             # every AVX2 CPU has them, as x86-64-v3 counts them together)
             if pf(40):
+                ident = os.environ.get("PROCESSOR_IDENTIFIER", "")
+                if "AuthenticAMD" in ident:
+                    if "Family 23 " in ident:
+                        try:
+                            model = int(ident.split("Model ")[1].split()[0])
+                            return "znver2" if model >= 49 else "znver1"
+                        except Exception:
+                            return "znver2"
+                    if "Family 25 " in ident:
+                        return "znver3"
                 return "x86-64-v3"
             return "x86-64-v2" if pf(38) else "x86-64"
-        flags = open("/proc/cpuinfo").read().split("flags", 1)[1].split(chr(10), 1)[0].split()
+        cpuinfo = open("/proc/cpuinfo").read()
+        flags = cpuinfo.split("flags", 1)[1].split(chr(10), 1)[0].split()
         if all(f in flags for f in want):
+            if "AuthenticAMD" in cpuinfo:
+                if "cpu family\t: 23" in cpuinfo:
+                    return "znver2" if "clwb" in flags or "rdpid" in flags else "znver1"
+                if "cpu family\t: 25" in cpuinfo:
+                    return "znver3"
             return "x86-64-v3"
         return "x86-64-v2" if all(f in flags for f in ("sse4_2", "popcnt", "ssse3")) else "x86-64"
     except Exception:
@@ -254,9 +270,11 @@ def host_march():
 
 
 MARCH = os.environ.get("RX_MARCH") or host_march()
-if MARCH != "x86-64-v3":
+if MARCH in ("x86-64-v2", "x86-64"):
     print("build: this CPU has no AVX2: the game is built for %s (a little slower)" % MARCH, flush=True)
-CPU = ["-march=" + MARCH, "-ffp-contract=off"]
+elif MARCH != "x86-64-v3":
+    print("build: tuned for host CPU architecture %s" % MARCH, flush=True)
+CPU = ["-march=" + MARCH, "-mtune=" + MARCH, "-ffp-contract=off"]
 
 
 def flags(gen, rt64, opt, polls):
@@ -395,20 +413,20 @@ def main():
     # biggest first, so the long ones do not end up alone at the end
     srcs.sort(key=lambda s: -os.path.getsize(s))
     # (hookshot) code_hot.c, the lift's hot functions together (A64_HOT_FUNCS + A64_HOT_CHUNK=1): at RX_HOT_OPT
-    # (default O2), so the hot callees inline into their hot callers
-    hot_fl = [("-" + os.environ.get("RX_HOT_OPT", "O2")) if f == "-" + a.opt else f for f in fl]
+    # (default O3), so the hot callees inline into their hot callers
+    hot_fl = [("-" + os.environ.get("RX_HOT_OPT", "O3")) if f == "-" + a.opt else f for f in fl]
     # (hookshot) RX_PGO=gen: code_hot.c counts its branches (host/pgo_rt.c writes them; -O1 builds much sooner, and the counters are
-    # placed before the optimiser, so a profile from it fits the -O2 build). RX_PGO=<merged .prof>: built with that profile
+    # placed before the optimiser, so a profile from it fits the -O2/-O3 build). RX_PGO=<merged .prof>: built with that profile
     if PGO == "gen":
-        hot_fl = [f if f != "-O2" else "-O1" for f in hot_fl] + ["-fprofile-instr-generate", "-mllvm", "-disable-vp=true"]
+        hot_fl = [f if f not in ("-O2", "-O3") else "-O1" for f in hot_fl] + ["-fprofile-instr-generate", "-mllvm", "-disable-vp=true"]
     elif PGO:
         hot_fl = hot_fl + ["-fprofile-instr-use=" + PGO]
     jobs = [(cc, s, os.path.join(obj_dir, os.path.basename(s)[:-2] + ".o"),
              hot_fl if os.path.basename(s).startswith("code_hot") else fl,
              shim_deps if os.path.dirname(s) == NX2_RT else deps) for s in srcs]
-    # the runtime: ordinary C at -O2, with its own headers (any host/*.h change rebuilds all of it)
+    # the runtime: ordinary C at -O3, with its own headers (any host/*.h change rebuilds all of it)
     host_fl = target() + CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
-        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O2", "-g0", "-mcx16", "-DA64_POLLING"] + WRITE_TRACK
+        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O3", "-g0", "-mcx16", "-DA64_POLLING"] + WRITE_TRACK
     host_deps = deps + b"".join(open(os.path.join(HOST, f), "rb").read() for f in sorted(os.listdir(HOST))
                                 if f.endswith(".h"))
     if LINUX:
@@ -422,7 +440,7 @@ def main():
               ([stamp_def] if os.path.basename(s) == "hos_main.c" else []), host_deps) for s in host_srcs]
     # libopus 1.5.2 (third_party/opus, from TOTKPort): nn::codec's hardware Opus decoder (host/nn_codec.c)
     if host_srcs:
-        oflags = target() + ["-O2", "-g0", "-Wno-everything", "-DOPUS_BUILD", "-DUSE_ALLOCA",
+        oflags = target() + CPU + ["-O3", "-g0", "-Wno-everything", "-DOPUS_BUILD", "-DUSE_ALLOCA",
                                               "-DHAVE_LRINTF", "-DHAVE_LRINT"] +             ["-I" + os.path.join(OPUS, d) for d in ("include", "celt", "silk", "silk/float", "src")]
         for rel in open(os.path.join(OPUS, "sources.txt")).read().split():
             jobs.append((cc, os.path.join(OPUS, rel), os.path.join(obj_dir, "opus_" + rel.replace("/", "_")[:-2] + ".o"),
@@ -433,7 +451,7 @@ def main():
         print("no wgpu-native at %s (WGPU_NATIVE): building without the renderer" % WGPU)
     if wgpu:
         cxx = toolchain.need(toolchain.find("clang++"))
-        gflags = target() + ["-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything",
+        gflags = target() + CPU + ["-std=c++20", "-O3", "-g0", "-DNDEBUG", "-Wno-everything",
                                               "-I" + os.path.join(GPU, "compat"),
                                               "-I" + os.path.join(GPU, "third_party", "suyu"),
                                               "-I" + os.path.join(WGPU, "include"), "-I" + HOST, "-I" + rt64] + WRITE_TRACK +                  ["-include", os.path.join(GPU, "render", "rx_wgpu_names.h")]   # (rx_* -> wgr_*: host/rx_backend.c)
@@ -462,7 +480,7 @@ def main():
             # (what the code takes for granted, which newer C++ libraries bring in by themselves and older ones do not: issue 48)
             "-include", "algorithm", "-include", "cstdio", "-include", "cstdlib", "-include", "cstring", "-include", "functional",
             "-include", "string", "-include", "vector",
-            "-std=c++20", "-O2", "-g0", "-DNDEBUG", "-Wno-everything", "-DVK_NO_PROTOTYPES", "-DMKWVK_BUILDING",
+            "-std=c++20", "-O3", "-g0", "-DNDEBUG", "-Wno-everything", "-DVK_NO_PROTOTYPES", "-DMKWVK_BUILDING",
             *(["-DHOOKSHOT_RELEASE"] if os.environ.get("RX_RELEASE") == "1" else []),   # (the shaders precompiled before the game)
             # (Eden's recompiler before suyu's root: suyu has its own shader_recompiler/ headers, and a Shader::Info
             # of the other layout in some objects is what crashed the descriptor walk. MKWVK_INCLUDES changes the

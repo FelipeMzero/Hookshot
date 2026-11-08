@@ -120,9 +120,10 @@ bool batch_on() {
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         p2.pNext = &dp;
         if (dev.physical) vkGetPhysicalDeviceProperties2(dev.physical, &p2), radv = dp.driverID == VK_DRIVER_ID_MESA_RADV;
+        const bool amd = radv || dev.props.vendorID == 0x1002;
         const char* e = getenv("RX_VK_BATCH");
-        const bool v = e ? atoi(e) != 0 : radv;
-        logf("vk: batched submits %s (RX_VK_BATCH%s)", v ? "on" : "off", !e && radv ? ", on with RADV" : "");
+        const bool v = e ? atoi(e) != 0 : amd;
+        logf("vk: batched submits %s (RX_VK_BATCH%s)", v ? "on" : "off", !e && amd ? (radv ? ", on with RADV" : ", on with AMD") : "");
         return v;
     }();
     return on && batch_tl != VK_NULL_HANDLE;
@@ -1071,7 +1072,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             if (logged_mesh++ < 8)
                 logf("vk: mesh draw kind %d: %d %d %d, indirect %#llx count %#llx max %d stride %d", d.kind, d.x, d.y,
                      d.z, (unsigned long long)d.indirect, (unsigned long long)d.count_addr, d.max, d.stride);
-            if (s.render_enabled && !s.raster_discard && !dry) {
+            if (s.render_enabled && !s.raster_discard && !dry && dev.mesh_shader) {
                 DrawArgs da;
                 da.mesh = true;
                 // (DrawMeshTasks(first, count): the count of task workgroups, as Eden draws NVN2's mesh draws; a
@@ -1096,7 +1097,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
         }
         default: break;
         }
-        if (h.op == NOP_DRAW || h.op == NOP_DRAW_IDX || h.op == NOP_DRAW_INDIRECT || h.op == NOP_DRAW_MESH ||
+        if (h.op == NOP_DRAW || h.op == NOP_DRAW_IDX || h.op == NOP_DRAW_INDIRECT || (h.op == NOP_DRAW_MESH && dev.mesh_shader) ||
             h.op == NOP_DISPATCH || h.op == NOP_DISPATCH_INDIRECT) {
             if (dry) {
                 const bool compute = h.op == NOP_DISPATCH || h.op == NOP_DISPATCH_INDIRECT;
@@ -1125,7 +1126,7 @@ constexpr int kMaxParts = 32;
 constexpr int kMaxBatch = 6;   // (three recording threads: more segments only took slots and submits)
 
 void maybe_split(VkCommandBuffer& cmd) {
-    static const int64_t every = getenv("RX_VK_CHUNK") ? atoll(getenv("RX_VK_CHUNK")) : 120;
+    static const int64_t every = getenv("RX_VK_CHUNK") ? atoll(getenv("RX_VK_CHUNK")) : (batch_on() ? 0 : 120);
     if (!rec_cur || every <= 0 || ++part_work < every || rec_parts + 1 >= kMaxParts || dump_on()) return;
     end_pass(cmd);
     flush_ub_updates(cmd);

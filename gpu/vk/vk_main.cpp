@@ -286,6 +286,9 @@ bool create_device() {
         vkGetPhysicalDeviceProperties2(dev.physical, &p2);
         const bool pin = f13.subgroupSizeControl && sc.minSubgroupSize <= 32 && sc.maxSubgroupSize >= 32 && !getenv("RX_VK_NO_SUBGROUP_PIN");
         dev.sg32_stages = pin ? sc.requiredSubgroupSizeStages : 0;
+        dev.max_subgroup_size = std::max(32u, f13.subgroupSizeControl && sc.maxSubgroupSize ? sc.maxSubgroupSize : sg.subgroupSize);
+        dev.subgroup_shuffle_relative = (sg.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT) != 0;
+        dev.subgroup_quad = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) != 0;
         logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
              (unsigned)dev.sg32_stages);
     }

@@ -1428,6 +1428,7 @@ uint64_t mirror_budget() {
         // (cards of 6 GB or less only: on 8 GB ones, a 3070 or a 4060, the game's memory read over PCIe instead left the GPU at a few
         // percent and the frame stuttering)
         if (vram && vram <= (6ull << 30) + (512ull << 20)) return vram / 8;
+        if (vram && vram <= (8ull << 30) + (512ull << 20)) return std::min<uint64_t>(vram / 5, 1536ull << 20);
         return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
     return b;

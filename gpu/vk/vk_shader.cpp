@@ -430,7 +430,7 @@ private:
     uint32_t local_memory = 0;
 };
 
-Shader::Profile make_profile() {
+Shader::Profile make_profile(VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT) {
     Shader::Profile p{};
     p.supported_spirv = 0x00010600;
     p.unified_descriptor_binding = true;
@@ -444,6 +444,8 @@ Shader::Profile make_profile() {
     p.support_fp32_denorm_preserve = p.support_fp32_denorm_flush = true;
     p.support_fp16_signed_zero_nan_preserve = p.support_fp32_signed_zero_nan_preserve = true;
     p.support_vote = true;
+    p.support_shuffle_relative = dev.subgroup_shuffle_relative;
+    p.support_quad_shuffles = dev.subgroup_quad;
     p.supported_subgroup_stages = VK_SHADER_STAGE_ALL;
     p.support_viewport_index_layer_non_geometry = true;
     p.support_typeless_image_loads = true;
@@ -454,10 +456,11 @@ Shader::Profile make_profile() {
     p.support_scaled_attributes = false;   // (*_UI2F / *_I2F read as integers, converted in the shader: R32 has no scaled format)
     p.support_multi_viewport = true;
     p.support_sampled_image_array_nonuniform_indexing = true;
-    p.warp_size_potentially_larger_than_guest = false;
+    const bool pinned32 = (dev.sg32_stages & stage) != 0 || dev.max_subgroup_size <= 32;
+    p.warp_size_potentially_larger_than_guest = !pinned32;
     p.lower_left_origin_mode = false;
     p.need_declared_frag_colors = false;
-    p.max_subgroup_size = 32;
+    p.max_subgroup_size = pinned32 ? 32 : dev.max_subgroup_size;
     p.min_ssbo_alignment = dev.props.limits.minStorageBufferOffsetAlignment;
     return p;
 }
@@ -636,9 +639,8 @@ bool still_valid(const NvnState& s, const Program& p) {
 std::mutex shader_mu;
 std::unordered_map<uint64_t, std::vector<std::unique_ptr<Program>>> programs;   // by the stages' code keys
 std::unordered_map<uint64_t, std::vector<Code>> codes;                          // by program serial
-const Shader::Profile& profile() {
-    static const Shader::Profile p = make_profile();
-    return p;
+Shader::Profile profile(VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT) {
+    return make_profile(stage);
 }
 
 const std::vector<Code>& codes_of(const NvnState& s) {
@@ -802,6 +804,9 @@ uint64_t disk_stamp() {
     add(&translator, sizeof translator);
     const uint32_t depth = host->depth_minus_w() != 0;   // (d3zessete's PR 54: programs made in either depth mode are kept apart)
     add(&depth, sizeof depth);
+    const uint32_t sg_cfg[] = {(uint32_t)dev.sg32_stages, dev.max_subgroup_size,
+                               (uint32_t)dev.subgroup_shuffle_relative, (uint32_t)dev.subgroup_quad};
+    add(sg_cfg, sizeof sg_cfg);
     // (the records keep Shader::Info as it lies in memory: a cache written by another C++ library (the MSVC build's, then the
     // llvm-mingw one's libc++) has other layouts, and reading it crashed at start. The library and the sizes, so it starts again)
     const uint32_t abi[] = {(uint32_t)sizeof(Shader::Info), (uint32_t)sizeof(Program), (uint32_t)sizeof(std::vector<uint32_t>),
@@ -1082,7 +1087,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
                 if ((!kept_one && (Shader::Backend::SPIRV::mma_software || dev.props.vendorID != 0x10DE)) || getenv("RX_VK_NO_F16"))
                     throw std::runtime_error("a network left out on this card");
             }
-            const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, t->program, bindings);
+            const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_COMPUTE_BIT), rt, t->program, bindings);
             // (EvilOOT) RX_VK_DUMP_SPV=<folder>: the SPIR-V of the programs RX_VK_MISS_LOG_PROG names (all: unset), for spirv-val
             if (const char* dir = getenv("RX_VK_DUMP_SPV"); dir && Shader::Optimization::g_nvn2_miss_log_this) {
                 char path[512];
@@ -1119,7 +1124,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
             vrt.convert_depth_mode = host->depth_minus_w() != 0;
             Stage v;
             v.nvn_stage = 0;
-            const std::vector<uint32_t> vspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), vrt, vs->program, bindings);
+            const std::vector<uint32_t> vspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_VERTEX_BIT), vrt, vs->program, bindings);
             dump_ir(p, "vertex", vs->program);
             {   // (the programs that read the draw's parameters from the driver bank, each once)
                 const auto& ld = vs->program.info.loads;
@@ -1151,7 +1156,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
                         if (frt.color_output_types[i] == Shader::AttributeType::Float) float_targets |= 1u << i;
                     Shader::Optimization::GuardFragmentOutputs(fs->program, float_targets);
                 }
-                const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), frt, fs->program, bindings);
+                const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_FRAGMENT_BIT), frt, fs->program, bindings);
                 dump_ir(p, "fragment", fs->program);
                 Stage f;
                 f.nvn_stage = 1;
@@ -1239,7 +1244,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             dump_ir(p, "task", task_t->program, task->key);
             Shader::RuntimeInfo rt{};
             rt.previous_stage_stores.mask.set();
-            const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, task_t->program, bindings);
+            const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_TASK_BIT_EXT), rt, task_t->program, bindings);
             kept.push_back(spirv);
             Stage st;
             st.nvn_stage = bank_stage(*task);
@@ -1271,7 +1276,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         if (task_t) mrt.previous_stage_stores = task_t->program.info.stores;
         else mrt.previous_stage_stores.mask.set();
         mrt.convert_depth_mode = host->depth_minus_w() != 0;
-        const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), mrt, mesh_t->program, bindings);
+        const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_MESH_BIT_EXT), mrt, mesh_t->program, bindings);
         kept.push_back(mspirv);
         Stage ms;
         ms.nvn_stage = bank_stage(mesh);
@@ -1293,7 +1298,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
                     frt.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
             }
             for (int i = 0; i < 8; i++) frt.color_output_types[i] = static_cast<Shader::AttributeType>(color_types[i]);
-            const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), frt, fs->program, bindings);
+            const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(VK_SHADER_STAGE_FRAGMENT_BIT), frt, fs->program, bindings);
             kept.push_back(fspirv);
             Stage f;
             f.nvn_stage = 1;
