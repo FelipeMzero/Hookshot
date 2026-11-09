@@ -98,10 +98,10 @@ const char* tx_preset(int v) {
 void sync_preset_budgets(int p) {
     switch (p) {
     case 1: opts.vram_mb = 2200;  opts.mirror_mb = 256;  break;
-    case 2: opts.vram_mb = 3600;  opts.mirror_mb = 512;  break;
-    case 3: opts.vram_mb = 4800;  opts.mirror_mb = 1024; break;
-    case 4: opts.vram_mb = 7500;  opts.mirror_mb = 2048; break;
-    case 5: opts.vram_mb = 11000; opts.mirror_mb = 3072; break;
+    case 2: opts.vram_mb = 3200;  opts.mirror_mb = 512;  break;
+    case 3: opts.vram_mb = 3800;  opts.mirror_mb = 768;  break;
+    case 4: opts.vram_mb = 7000;  opts.mirror_mb = 1536; break;
+    case 5: opts.vram_mb = 10000; opts.mirror_mb = 2560; break;
     default: opts.vram_mb = 0;    opts.mirror_mb = 0;    break;
     }
 }

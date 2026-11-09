@@ -2887,14 +2887,17 @@ void texture_frame(uint64_t completed) {
     if (frame_no % 10) return;
     uint64_t used = 0, allowed = 0, block_free = 0;
     const bool known = vram_usage(&used, &allowed, &block_free);
-    if (!own)   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)
+    if (!own)   // (RX_VK_VRAM_MB, else 55-70% of what the driver allows the process at the first look)
         own = getenv("RX_VK_VRAM_MB") ? (uint64_t)atoi(getenv("RX_VK_VRAM_MB")) << 20
-              : known                ? std::min<uint64_t>(allowed / 10 * 7, allowed <= (7ull << 30) + (512ull << 20) ? (4096ull << 20) : (6144ull << 20))   // (hookshot: at most 6 GB. A 16 GB
+              : known                ? std::min<uint64_t>(allowed <= (7ull << 30) + (512ull << 20) ? (allowed / 100 * 55) : (allowed / 10 * 7), allowed <= (7ull << 30) + (512ull << 20) ? (3584ull << 20) : (6144ull << 20))   // (hookshot: at most 6 GB. A 16 GB
                                                                                              // card's 10.8 GB filled up, read as a leak: 105, 106)
-                                     : 4096ull << 20;
+                                     : 3584ull << 20;
     const bool preset_budget = opts.vram_mb > 0 && preset_caps_memory();   // (a smaller preset on a bigger card: the card's own)
     uint64_t budget = preset_budget ? ((uint64_t)opts.vram_mb << 20) : own;
-    if (preset_budget && known) {
+    if (known && allowed <= (7ull << 30) + (512ull << 20)) {
+        // Safety clamp on cards <= 8GB: cap texture budget to 58% of allowed memory (~3750 MB on RX 5700 XT)
+        budget = std::min(budget, (allowed / 100) * 58);
+    } else if (preset_budget && known) {
         // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
         budget = std::min(budget, (allowed / 4) * 3);
     }
